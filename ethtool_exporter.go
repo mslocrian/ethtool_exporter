@@ -3,10 +3,13 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -19,9 +22,11 @@ import (
 
 const namespace = "ethtool"
 
+var ethtool string
+
 var (
 	ethtoolScrapeSuccessDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "scrape", "collector_duration_seconds"),   
+		prometheus.BuildFQName(namespace, "scrape", "collector_duration_seconds"),
 		"ethtool_exporter: Duration of collector scrape.",
 		[]string{"collector"},
 		nil,
@@ -36,6 +41,17 @@ var (
 )
 
 func init() {
+	if _, err := os.Stat("/sbin/ethtool"); err == nil {
+		ethtool = "/sbin/ethtool"
+	}
+
+	if _, err := os.Stat("/usr/sbin/ethtool"); err == nil {
+		ethtool = "/usr/sbin/ethtool"
+	}
+	if ethtool == "" {
+		log.Fatalf("Could not find ethtool executable.")
+	}
+
 	prometheus.MustRegister(version.NewCollector("ethtool_exporter"))
 }
 
@@ -58,46 +74,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	h.ServeHTTP(w, r)
 }
 
-/*
-func runEthtool(interface string) ([]byte, error) {
-	cmd := exec.Command("/usr/sbin/ethtool", "-S", interface)
-	out, err := c
-}
-*/
-
-func collectEthtoolMetrics(ch chan<- prometheus.Metric) error {
-	interfaces, err := ioutil.ReadDir("/sys/class/net")
-	if err != nil {
-		return err
-	}
-
-	for _, entry := range interfaces {
-		log.Infof("interface=%#v\n", entry)
-		if entry.Mode()&os.ModeSymlink != 0 {
-			log.Infof("%v is a symlink!", entry.Name())
-		}
-		//out, err := runEthtool(entry.Name())
-		cmd := exec.Command("/usr/sbin/ethtool", "-S", entry.Name())
-/*
-		err := cmd.Run()
-		if err != nil {
-			continue
-		} 
-*/
-		out, err := cmd.Output()
-		if err != nil {
-			continue
-		}
-		scanner := bufio.NewScanner(bytes.NewReader(out))
-		for scanner.Scan() {
-		log.Infof("out=%v", scanner.Text())
-		}
-	}
-	return err
-}
-
 type EthtoolExporter struct {
 	collectLock sync.Mutex
+	collectors  map[string]*prometheus.GaugeVec
 }
 
 func (e *EthtoolExporter) Describe(ch chan<- *prometheus.Desc) {
@@ -107,13 +86,63 @@ func (e *EthtoolExporter) Describe(ch chan<- *prometheus.Desc) {
 
 func (e *EthtoolExporter) Collect(ch chan<- prometheus.Metric) {
 	e.collectLock.Lock()
-	err := collectEthtoolMetrics(ch)
-	_ = err
-	e.collectLock.Unlock()
+	defer e.collectLock.Unlock()
+
+	// get a list of interfaces
+	interfaces, err := ioutil.ReadDir("/sys/class/net")
+	if err != nil {
+		log.Errorf("Collect(): err=%v", err.Error())
+		return
+	}
+
+	for _, entry := range interfaces {
+		var metrics map[string]float64
+		metrics = make(map[string]float64)
+
+		cmd := exec.Command(ethtool, "-S", entry.Name())
+		out, err := cmd.Output()
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(bytes.NewReader(out))
+		for scanner.Scan() {
+			if strings.HasPrefix(scanner.Text(), "NIC statistics") {
+				continue
+			}
+			entries := strings.Split(scanner.Text(), ":")
+			m, err := strconv.ParseFloat(strings.TrimSpace(entries[1]), 64)
+			if err != nil {
+				log.Errorf("Could not convert ascii metric to integer %#v", entries)
+				continue
+			}
+			metrics[strings.TrimSpace(entries[0])] = m
+		}
+		for k, v := range metrics {
+			if _, ok := e.collectors[k]; !ok {
+				e.collectors[k] = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+					Name: fmt.Sprintf("%s_%s", namespace, k),
+					Help: "interface statistics",
+				}, []string{"interface"})
+				prometheus.MustRegister(e.collectors[k])
+				e.collectors[k].With(prometheus.Labels{"interface": entry.Name()}).Set(v)
+			} else {
+				e.collectors[k].With(prometheus.Labels{"interface": entry.Name()}).Set(v)
+			}
+		}
+	}
 }
 
+func entryIntfExistsInCollector(s string, intfs []os.FileInfo) bool {
+	for _, i := range intfs {
+		if i.Name() == s {
+			return true
+		}
+	}
+	return false
+}
 func newEthtoolExporter() *EthtoolExporter {
-	return &EthtoolExporter{}
+	c := make(map[string]*prometheus.GaugeVec)
+	return &EthtoolExporter{collectors: c}
 }
 
 func main() {
@@ -132,7 +161,6 @@ func main() {
 
 	exporter := newEthtoolExporter()
 	prometheus.MustRegister(exporter)
-	_ = exporter
 
 	http.HandleFunc(*metricsPath, handler)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
