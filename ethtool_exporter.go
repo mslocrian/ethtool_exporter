@@ -52,6 +52,22 @@ func init() {
 		log.Fatalf("Could not find ethtool executable.")
 	}
 
+	// we only want to support ethtool version >= 4 currently.
+	// version 3.x gives whackadoo output that I do not want to
+	// parse... sorry.
+	out, err := exec.Command(ethtool, "--version").Output()
+	if err != nil {
+		log.Fatalf(err.Error())
+	}
+	ethtoolVersion, err := strconv.ParseFloat(strings.TrimSpace(strings.Split(string(out), " ")[2]), 64)
+	if err != nil {
+		log.Fatalf(err.Error())
+	}
+
+	if ethtoolVersion <= 3.15 {
+		log.Fatalf("I do not want to support ethtool <= 3.15. Don't want to parse that format today.")
+	}
+
 	prometheus.MustRegister(version.NewCollector("ethtool_exporter"))
 }
 
@@ -82,6 +98,15 @@ type EthtoolExporter struct {
 func (e *EthtoolExporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- ethtoolScrapeSuccessDesc
 	ch <- ethtoolErrorDesc
+}
+
+func formatMetricName(m string) string {
+	var metric string
+	// strip leading space
+	metric = strings.TrimSpace(m)
+	// replace spaces
+	metric = strings.Replace(metric, " ", "_", -1)
+	return metric
 }
 
 func (e *EthtoolExporter) Collect(ch chan<- prometheus.Metric) {
@@ -115,7 +140,7 @@ func (e *EthtoolExporter) Collect(ch chan<- prometheus.Metric) {
 				log.Errorf("Could not convert ascii metric to integer %#v", entries)
 				continue
 			}
-			metrics[strings.TrimSpace(entries[0])] = m
+			metrics[formatMetricName(entries[0])] = m
 		}
 		for k, v := range metrics {
 			ch <- prometheus.MustNewConstMetric(
