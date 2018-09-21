@@ -3,7 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"fmt"
+	//"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -118,16 +118,16 @@ func (e *EthtoolExporter) Collect(ch chan<- prometheus.Metric) {
 			metrics[strings.TrimSpace(entries[0])] = m
 		}
 		for k, v := range metrics {
-			if _, ok := e.collectors[k]; !ok {
-				e.collectors[k] = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-					Name: fmt.Sprintf("%s_%s", namespace, k),
-					Help: "interface statistics",
-				}, []string{"interface"})
-				prometheus.MustRegister(e.collectors[k])
-				e.collectors[k].With(prometheus.Labels{"interface": entry.Name()}).Set(v)
-			} else {
-				e.collectors[k].With(prometheus.Labels{"interface": entry.Name()}).Set(v)
-			}
+			ch <- prometheus.MustNewConstMetric(
+				prometheus.NewDesc(
+					prometheus.BuildFQName(namespace, k, "total"),
+					"interface statistics",
+					[]string{"interface"},
+					nil,
+				),
+				prometheus.GaugeValue,
+				v,
+				entry.Name())
 		}
 	}
 }
