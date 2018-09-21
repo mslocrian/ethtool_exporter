@@ -152,7 +152,7 @@ func main() {
 	)
 
 	log.AddFlags(kingpin.CommandLine)
-	kingpin.Version(version.Print("node_exporter"))
+	kingpin.Version(version.Print("ethtool_exporter"))
 	kingpin.HelpFlag.Short('h')
 	kingpin.Parse()
 
